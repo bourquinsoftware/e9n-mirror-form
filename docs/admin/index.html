@@ -1,0 +1,195 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Mirror Admin</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<style>
+:root{--bg:#faf8f5;--fg:#1d1b18;--mut:#6b665f;--card:#fff;--line:#e4dfd7;--acc:#7a5c3a}
+@media(prefers-color-scheme:dark){:root{--bg:#161412;--fg:#efeae3;--mut:#9a948b;--card:#201d1a;--line:#34302b;--acc:#d2a873}}
+*{box-sizing:border-box}[hidden]{display:none!important}
+body{margin:0;font:15px/1.5 Inter,system-ui,sans-serif;background:var(--bg);color:var(--fg)}
+.wrap{max-width:1100px;margin:0 auto;padding:24px 16px}
+h1{font:600 24px Georgia,serif;margin:0}h2{font-size:15px;margin:0 0 10px}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.top{justify-content:space-between;margin-bottom:16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px}
+.grid{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));margin-bottom:16px}
+.kpis{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));margin-bottom:16px}
+.kpi b{display:block;font-size:26px}.mut,.kpi span{color:var(--mut);font-size:13px}
+input,select,button{font:inherit;padding:8px 12px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--fg)}
+button{cursor:pointer}button.pri{background:var(--acc);color:#fff;border-color:var(--acc)}
+.hb{display:grid;grid-template-columns:110px 1fr 40px;gap:8px;align-items:center;margin:5px 0;font-size:13px}
+.hb i{display:block;height:14px;border-radius:4px;background:var(--acc)}
+.vb{display:flex;align-items:flex-end;gap:3px;height:100px;margin-top:6px}
+.vb div{flex:1;background:var(--acc);border-radius:3px 3px 0 0;min-height:1px}
+.lab{display:flex;gap:3px;font-size:10px;color:var(--mut)}.lab span{flex:1;text-align:center;overflow:hidden}
+table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line)}
+.scroll{overflow-x:auto}#login{max-width:340px;margin:12vh auto}#login input{width:100%;margin:6px 0}
+.err{color:#b3261e;font-size:13px;min-height:18px}
+</style></head><body><div class="wrap">
+
+<div id="login" class="card" hidden>
+  <h1>Mirror Admin</h1><p class="mut">Sign in with your admin account.</p>
+  <input id="em" type="email" placeholder="Email" autocomplete="username">
+  <input id="pw" type="password" placeholder="Password" autocomplete="current-password">
+  <div class="err" id="lerr"></div>
+  <button class="pri" id="go" style="width:100%">Sign in</button>
+</div>
+
+<div id="app" hidden>
+  <div class="row top"><h1>The Mirror: Admin</h1>
+    <div class="row">
+      <select id="ver"></select>
+      <label class="mut"><input type="checkbox" id="test"> include test responses</label>
+      <button id="refresh">Refresh</button><button id="out">Sign out</button>
+    </div></div>
+  <div class="row" style="margin-bottom:16px">
+    <button class="pri" id="xr">Export responses (CSV)</button>
+    <button id="xa">Export answers (CSV)</button><span class="mut" id="xs"></span>
+  </div>
+  <div class="err" id="aerr"></div>
+  <div class="kpis" id="kpis"></div>
+  <div class="grid"><div class="card"><h2>Responses per day (last 30 days)</h2><div id="daily"></div></div>
+    <div class="card"><h2>Primary archetype</h2><div id="arch"></div></div></div>
+  <h2>Score distribution by dimension</h2><div class="grid" id="dims"></div>
+  <div class="card" style="margin-bottom:16px"><h2>Quiz versions</h2><div class="scroll" id="vers"></div></div>
+  <div class="card"><h2>Latest responses</h2><div class="scroll" id="recent"></div></div>
+</div>
+</div>
+<script>
+const CFG = {
+  url: 'https://qsiffumdmlrfilneshpe.supabase.co',   // <-- EDIT: https://<project-ref>.supabase.co
+  key: 'sb_publishable_mTQ80MXO72d1xbGwWi1Mhg_P7XFNRUA'    // <-- EDIT: the anon/public key (safe here; RLS + admin role protect the data)
+};
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const pretty = k => k.replace(/([A-Z])/g,' $1').replace(/^./, c => c.toUpperCase());
+const sb = CFG.url && CFG.key ? supabase.createClient(CFG.url, CFG.key) : null;
+let ALL = [];
+
+async function fetchAll(view, orderCols){
+  let out = [], from = 0;
+  for(;;){
+    let q = sb.from(view).select('*');
+    orderCols.forEach(c => q = q.order(c, {ascending:true}));
+    const {data, error} = await q.range(from, from + 999);
+    if (error) throw error;
+    out = out.concat(data);
+    if (data.length < 1000) return out;
+    from += 1000;
+  }
+}
+function showLogin(msg){ $('app').hidden = true; $('login').hidden = false; $('lerr').textContent = msg || ''; }
+
+async function enter(session){
+  if ((session.user.app_metadata || {}).role !== 'admin'){ await sb.auth.signOut(); showLogin('This account is not an admin.'); return; }
+  $('login').hidden = true; $('app').hidden = false; $('aerr').textContent = '';
+  try { ALL = await fetchAll('admin_responses', ['submitted_at','response_id']); }
+  catch(e){ $('aerr').textContent = 'Could not load data: ' + (e.message || e); return; }
+  const cur = $('ver').value, vs = [...new Set(ALL.map(r => r.quiz_version))].sort();
+  $('ver').innerHTML = '<option value="all">All versions</option>' + vs.map(v => `<option>${esc(v)}</option>`).join('');
+  if (vs.includes(cur)) $('ver').value = cur;
+  render();
+}
+
+const rows = () => { const v = $('ver').value, t = $('test').checked; return ALL.filter(r => (v === 'all' || r.quiz_version === v) && (t || !r.is_test)); };
+const count = (arr, f) => arr.reduce((m, x) => (m[f(x)] = (m[f(x)] || 0) + 1, m), {});
+
+function hbars(obj){
+  const e = Object.entries(obj).sort((a,b) => b[1]-a[1]); if (!e.length) return '<p class="mut">No data</p>';
+  const m = e[0][1];
+  return e.map(([k,n]) => `<div class="hb"><span>${esc(pretty(k))}</span><i style="width:${n/m*100}%"></i><span>${n}</span></div>`).join('');
+}
+function hist(vals, nb = 8){
+  if (!vals.length) return '<p class="mut">No data</p>';
+  const lo = Math.floor(Math.min(...vals)); let hi = Math.ceil(Math.max(...vals)); if (hi === lo) hi = lo + 1;
+  const w = (hi - lo) / nb, c = Array(nb).fill(0);
+  vals.forEach(v => c[Math.min(nb-1, Math.floor((v - lo) / w))]++);
+  const m = Math.max(...c);
+  return `<div class="vb">${c.map((n,i) => `<div title="${(lo+i*w).toFixed(1)} to ${(lo+(i+1)*w).toFixed(1)}: ${n}" style="height:${n/m*100}%"></div>`).join('')}</div>
+    <div class="lab">${c.map((_,i) => `<span>${(lo+i*w).toFixed(1)}</span>`).join('')}</div>`;
+}
+
+function render(){
+  const R = rows(), day = d => new Date(d).toISOString().slice(0,10);
+  const week = Date.now() - 7*864e5;
+  $('kpis').innerHTML = [
+    [R.length, 'responses'], [new Set(R.map(r => (r.email||'').toLowerCase())).size, 'unique people'],
+    [R.filter(r => new Date(r.submitted_at) > week).length, 'last 7 days'],
+    [new Set(ALL.map(r => r.quiz_version)).size, 'quiz versions'], [ALL.filter(r => r.is_test).length, 'test responses (all)']
+  ].map(([n,l]) => `<div class="card kpi"><b>${n}</b><span>${l}</span></div>`).join('');
+
+  const per = count(R, r => day(r.submitted_at)), days = [];
+  for (let i = 29; i >= 0; i--) days.push(day(Date.now() - i*864e5));
+  const dv = days.map(d => per[d] || 0), dm = Math.max(1, ...dv);
+  $('daily').innerHTML = `<div class="vb">${dv.map((n,i) => `<div title="${days[i]}: ${n}" style="height:${n/dm*100}%"></div>`).join('')}</div>
+    <div class="lab"><span>${days[0].slice(5)}</span><span style="text-align:right">${days[29].slice(5)}</span></div>`;
+
+  $('arch').innerHTML = hbars(count(R, r => r.primary_archetype || 'unknown'));
+
+  const keys = [...new Set(R.flatMap(r => Object.keys(r.dimension_scores || {})))];
+  $('dims').innerHTML = keys.map(k => {
+    const v = R.map(r => (r.dimension_scores || {})[k]).filter(x => typeof x === 'number');
+    const mean = v.length ? (v.reduce((a,b) => a+b, 0) / v.length).toFixed(2) : '-';
+    return `<div class="card"><h2>${esc(pretty(k))} <span class="mut">mean ${mean}, n=${v.length}</span></h2>${hist(v)}</div>`;
+  }).join('') || '<p class="mut">No data</p>';
+
+  const byV = {}; ALL.filter(r => $('test').checked || !r.is_test).forEach(r => (byV[r.quiz_version] = byV[r.quiz_version] || []).push(r));
+  $('vers').innerHTML = '<table><tr><th>Version</th><th>Responses</th><th>First</th><th>Last</th><th>Top archetype</th></tr>' +
+    Object.entries(byV).sort().map(([v, a]) => {
+      const t = Object.entries(count(a, r => r.primary_archetype || 'unknown')).sort((x,y) => y[1]-x[1])[0];
+      return `<tr><td>${esc(v)}</td><td>${a.length}</td><td>${esc(a[0].submitted_at.slice(0,10))}</td><td>${esc(a[a.length-1].submitted_at.slice(0,10))}</td><td>${esc(pretty(t[0]))} (${t[1]})</td></tr>`;
+    }).join('') + '</table>';
+
+  $('recent').innerHTML = '<table><tr><th>Date</th><th>Name</th><th>Email</th><th>Version</th><th>Primary</th><th>Supporting</th></tr>' +
+    R.slice(-25).reverse().map(r => `<tr><td>${esc(r.submitted_at.slice(0,16).replace('T',' '))}</td><td>${esc(r.name)}</td><td>${esc(r.email)}</td><td>${esc(r.quiz_version)}</td><td>${esc(r.primary_archetype)}</td><td>${esc(r.supporting_archetype)}</td></tr>`).join('') + '</table>';
+}
+
+/* ---- CSV (cells starting with = + - @ are prefixed with ' to block spreadsheet formula injection) ---- */
+function toCsv(data, cols){
+  const q = v => {
+    if (v == null) return '';
+    let s = typeof v === 'object' ? JSON.stringify(v) : String(v);
+    if (typeof v === 'string' && /^[=+\-@\t\r]/.test(s)) s = "'" + s;
+    return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  };
+  return '\ufeff' + [cols.join(',')].concat(data.map(r => cols.map(c => q(r[c])).join(','))).join('\r\n');
+}
+function download(name, text){
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([text], {type:'text/csv;charset=utf-8'})); a.download = name; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+const stamp = () => ($('ver').value) + '-' + new Date().toISOString().slice(0,10);
+
+$('xr').onclick = () => {
+  const R = rows(), dk = [...new Set(R.flatMap(r => Object.keys(r.dimension_scores || {})))], ak = [...new Set(R.flatMap(r => Object.keys(r.archetype_scores || {})))];
+  const flat = R.map(r => { const o = {...r}; dk.forEach(k => o['dim_'+k] = (r.dimension_scores||{})[k]); ak.forEach(k => o['arch_'+k] = (r.archetype_scores||{})[k]); return o; });
+  const cols = ['response_id','submitted_at','name','email','quiz_version','source','is_test','primary_archetype','supporting_archetype']
+    .concat(dk.map(k => 'dim_'+k), ak.map(k => 'arch_'+k));
+  download('mirror-responses-' + stamp() + '.csv', toCsv(flat, cols));
+};
+$('xa').onclick = async () => {
+  $('xs').textContent = 'Fetching answers...';
+  try {
+    const ids = new Set(rows().map(r => r.response_id));
+    const A = (await fetchAll('admin_answers', ['response_id','question_key'])).filter(a => ids.has(a.response_id));
+    download('mirror-answers-' + stamp() + '.csv', toCsv(A, ['response_id','submitted_at','email','quiz_version','section','question_key','question_text','value_num','scored_num','value_json','is_test']));
+    $('xs').textContent = A.length + ' answers exported';
+  } catch(e){ $('xs').textContent = 'Export failed: ' + (e.message || e); }
+};
+
+/* ---- wiring ---- */
+$('go').onclick = async () => {
+  $('lerr').textContent = '';
+  const {data, error} = await sb.auth.signInWithPassword({email: $('em').value.trim(), password: $('pw').value});
+  if (error) { $('lerr').textContent = error.message; return; }
+  $('pw').value = ''; enter(data.session);
+};
+$('pw').onkeydown = e => { if (e.key === 'Enter') $('go').click(); };
+$('out').onclick = async () => { await sb.auth.signOut(); ALL = []; showLogin(); };
+$('refresh').onclick = async () => { const {data} = await sb.auth.getSession(); data.session ? enter(data.session) : showLogin(); };
+$('ver').onchange = $('test').onchange = render;
+
+(async () => {
+  if (!sb) { showLogin('Set CFG.url and CFG.key at the top of the script.'); return; }
+  const {data} = await sb.auth.getSession();
+  data.session ? enter(data.session) : showLogin();
+})();
+</script></body></html>
